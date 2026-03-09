@@ -25,78 +25,44 @@ async def inspect_trae_dom():
         await client.connect()
         print("✓ Connected to Trae\n")
 
-        # Inspect various potential selectors
-        inspections = [
-            ("Content Editable Elements", "[contenteditable='true']"),
-            ("Textareas", "textarea"),
-            ("Text Inputs", "input[type='text']"),
-            ("Buttons", "button"),
-            ("Submit Buttons", "button[type='submit']"),
-            ("Messages Containers", "[class*='message'], [class*='chat'], [role='log']"),
-            ("AI/Assistant Elements", "[class*='assistant'], [class*='ai'], [class*='bot']"),
-            ("Loading/Thinking Indicators", "[class*='thinking'], [class*='loading'], [class*='typing']"),
-        ]
+        # ── Section 1: Page Info ──
+        print("=" * 60)
+        print("PAGE INFORMATION")
+        print("=" * 60)
+        page_info = await client.evaluate(
+            """((() => {
+                return {
+                    title: document.title,
+                    url: window.location.href,
+                    bodyTextLen: document.body.innerText.length
+                };
+            })())"""
+        )
+        if page_info:
+            print(f"  Title: {page_info.get('title')}")
+            print(f"  URL: {page_info.get('url')}")
+            print(f"  Body text length: {page_info.get('bodyTextLen')}")
 
-        for name, selector in inspections:
-            print(f"\n{name}:")
-            print(f"  Selector: {selector}")
-
-            result = await client.evaluate(
-                f"""() => {{
-                    const elements = document.querySelectorAll('{selector}');
-                    if (elements.length === 0) return null;
-
-                    return Array.from(elements).slice(0, 3).map(el => ({{
-                        tagName: el.tagName,
-                        id: el.id || '',
-                        className: el.className || '',
-                        textContent: (el.textContent || '').substring(0, 50),
-                        placeholder: el.placeholder || '',
-                        ariaLabel: el.getAttribute('aria-label') || ''
-                    }}));
-                }}"""
-            )
-
-            if result:
-                print(f"  Found {len(result)} elements")
-                for i, el in enumerate(result[:3], 1):
-                    print(f"    {i}. Tag: {el['tagName']}")
-                    if el['id']:
-                        print(f"       ID: {el['id']}")
-                    if el['className']:
-                        print(f"       Class: {el['className'][:100]}")
-                    if el['placeholder']:
-                        print(f"       Placeholder: {el['placeholder']}")
-                    if el['ariaLabel']:
-                        print(f"       ARIA Label: {el['ariaLabel']}")
-                    if el['textContent']:
-                        print(f"       Text: {el['textContent'][:50]}")
-            else:
-                print("  ✗ Not found")
-
-        # Try to find the chat input and send button specifically
-        print("\n" + "="*60)
-        print("CHAT INTERFACE ANALYSIS")
-        print("="*60)
-
-        # Look for input
-        print("\n1. Searching for Chat Input:")
+        # ── Section 2: Chat Input ──
+        print("\n" + "=" * 60)
+        print("CHAT INPUT ELEMENTS")
+        print("=" * 60)
         input_selectors = [
-            "[contenteditable='true']",
-            "textarea",
-            "input[type='text']",
-            "[placeholder*='message' i]",
-            "[placeholder*='chat' i]",
-            "[role='textbox']"
+            'div.chat-input-v2-input-box-editable[role="textbox"]',
+            'div.chat-input-v2-input-box-editable',
+            '[class*="chat-input"]',
+            '[class*="input-box"][contenteditable]',
+            'div[role="textbox"]',
+            'textarea.inputarea',
+            '[contenteditable="true"]',
         ]
 
         for selector in input_selectors:
             result = await client.evaluate(
-                f"""() => {{
+                f"""((() => {{
                     const el = document.querySelector('{selector}');
                     if (!el) return null;
 
-                    // Check if it looks like a chat input
                     const rect = el.getBoundingClientRect();
                     const isVisible = rect.width > 0 && rect.height > 0;
 
@@ -104,40 +70,34 @@ async def inspect_trae_dom():
                         selector: '{selector}',
                         tagName: el.tagName,
                         id: el.id || '',
-                        className: el.className || '',
-                        placeholder: el.placeholder || '',
+                        className: (el.className || '').substring(0, 120),
+                        contentEditable: el.contentEditable,
                         isVisible: isVisible,
-                        rect: {{ width: rect.width, height: rect.height }}
+                        width: Math.round(rect.width),
+                        height: Math.round(rect.height)
                     }};
-                }}"""
+                }})())"""
             )
 
-            if result and result['isVisible']:
-                print(f"  ✓ Found: {selector}")
-                print(f"    Tag: {result['tagName']}")
-                if result['id']:
-                    print(f"    ID: {result['id']}")
-                if result['className']:
-                    print(f"    Class: {result['className'][:100]}")
-                if result['placeholder']:
-                    print(f"    Placeholder: {result['placeholder']}")
-                print(f"    Size: {result['rect']['width']}x{result['rect']['height']}")
-                break
+            if result and result.get('isVisible'):
+                print(f"  ✓ {selector}")
+                print(f"    Tag: {result['tagName']}, Size: {result['width']}x{result['height']}")
+                print(f"    Class: {result['className']}")
 
-        # Look for send button
-        print("\n2. Searching for Send Button:")
+        # ── Section 3: Send Button ──
+        print("\n" + "=" * 60)
+        print("SEND BUTTON")
+        print("=" * 60)
         button_selectors = [
-            "button[type='submit']",
-            "button[aria-label*='send' i]",
-            "button[aria-label*='Send' i]",
-            "button[title*='send' i]",
-            "button[class*='send' i]",
-            "[role='button'][class*='submit' i]"
+            '.chat-input-v2-send-button',
+            'button[class*="send" i]',
+            'button[type="submit"]',
+            'button[aria-label*="send" i]',
         ]
 
         for selector in button_selectors:
             result = await client.evaluate(
-                f"""() => {{
+                f"""((() => {{
                     const el = document.querySelector('{selector}');
                     if (!el) return null;
 
@@ -147,74 +107,132 @@ async def inspect_trae_dom():
                     return {{
                         selector: '{selector}',
                         tagName: el.tagName,
-                        textContent: (el.textContent || '').trim(),
-                        ariaLabel: el.getAttribute('aria-label') || '',
-                        isVisible: isVisible
+                        className: (el.className || '').substring(0, 120),
+                        disabled: el.disabled || el.classList.contains('disabled'),
+                        isVisible: isVisible,
+                        text: (el.textContent || '').trim().substring(0, 50)
                     }};
-                }}"""
+                }})())"""
             )
 
-            if result and result['isVisible']:
-                print(f"  ✓ Found: {selector}")
-                print(f"    Text: {result['textContent']}")
-                if result['ariaLabel']:
-                    print(f"    ARIA Label: {result['ariaLabel']}")
-                break
+            if result and result.get('isVisible'):
+                dis = " (DISABLED)" if result.get('disabled') else ""
+                print(f"  ✓ {selector}{dis}")
+                print(f"    Class: {result['className']}")
 
-        # Look for message containers
-        print("\n3. Searching for Message Containers:")
-        container_selectors = [
-            "[class*='message-container']",
-            "[class*='chat-container']",
-            "[role='log']",
-            "[class*='messages']",
-            "[class*='conversation']"
-        ]
-
-        for selector in container_selectors:
-            result = await client.evaluate(
-                f"""() => {{
-                    const els = document.querySelectorAll('{selector}');
-                    if (els.length === 0) return null;
-
-                    return {{
-                        selector: '{selector}',
-                        count: els.length,
-                        first: {{
-                            tagName: els[0].tagName,
-                            className: els[0].className || ''
-                        }}
-                    }};
-                }}"""
-            )
-
-            if result:
-                print(f"  ✓ Found: {selector} ({result['count']} elements)")
-                print(f"    First element tag: {result['first']['tagName']}")
-                if result['first']['className']:
-                    print(f"    First element class: {result['first']['className'][:100]}")
-                break
-
-        # Get page title and URL for context
-        print("\n4. Page Information:")
-        page_info = await client.evaluate(
-            """() => {
-                return {
-                    title: document.title,
-                    url: window.location.href,
-                    userAgent: navigator.userAgent
-                };
-            }"""
+        # ── Section 4: Message Turns ──
+        print("\n" + "=" * 60)
+        print("CHAT MESSAGE TURNS")
+        print("=" * 60)
+        result = await client.evaluate(
+            """((() => {
+                const turns = document.querySelectorAll(
+                    'section.chat-turn.user, section.chat-turn.assistant'
+                );
+                return Array.from(turns).map((turn, i) => {
+                    const isUser = turn.classList.contains('user');
+                    const text = (turn.textContent || '').substring(0, 100);
+                    return {
+                        index: i,
+                        role: isUser ? 'USER' : 'ASSISTANT',
+                        className: (turn.className || '').substring(0, 80),
+                        textLen: (turn.textContent || '').length,
+                        preview: text
+                    };
+                });
+            })())"""
         )
 
-        if page_info:
-            print(f"  Title: {page_info['title']}")
-            print(f"  URL: {page_info['url']}")
+        if result:
+            print(f"  Total turns: {len(result)}")
+            for turn in result:
+                print(f"  [{turn['index']}] {turn['role']} ({turn['textLen']} chars)")
+                print(f"       Class: {turn['className']}")
+                print(f"       Preview: {turn['preview'][:80]}...")
+        else:
+            print("  No chat turns found")
 
-        print("\n" + "="*60)
+        # ── Section 5: Thinking/Loading State ──
+        print("\n" + "=" * 60)
+        print("THINKING/LOADING INDICATORS")
+        print("=" * 60)
+        result = await client.evaluate(
+            """((() => {
+                const selectors = [
+                    '[class*="thinking"]',
+                    '[class*="deep-thinking"]',
+                    '[class*="loading"]:not(.done)',
+                    '[class*="generating"]',
+                    '[class*="streaming"]',
+                    '[class*="pending"]',
+                    '[class*="stop-button"]',
+                    '[class*="stop_button"]',
+                ];
+                const results = [];
+                for (const sel of selectors) {
+                    const els = document.querySelectorAll(sel);
+                    if (els.length > 0) {
+                        const first = els[0];
+                        const rect = first.getBoundingClientRect();
+                        results.push({
+                            selector: sel,
+                            count: els.length,
+                            firstClass: (first.className || '').substring(0, 100),
+                            visible: rect.width > 0 && rect.height > 0
+                        });
+                    }
+                }
+                return results;
+            })())"""
+        )
+
+        if result:
+            for r in result:
+                vis = "visible" if r['visible'] else "hidden"
+                print(f"  {r['selector']} ({r['count']} elements, {vis})")
+                print(f"    Class: {r['firstClass']}")
+        else:
+            print("  No indicators found")
+
+        # ── Section 6: Chat-related elements ──
+        print("\n" + "=" * 60)
+        print("CHAT-RELATED CLASS ELEMENTS (unique)")
+        print("=" * 60)
+        result = await client.evaluate(
+            """((() => {
+                const all = document.querySelectorAll('[class*="chat"]');
+                const seen = new Set();
+                const results = [];
+                for (const el of all) {
+                    const cls = (el.className || '').substring(0, 120);
+                    if (seen.has(cls)) continue;
+                    seen.add(cls);
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width > 0 && rect.height > 0) {
+                        results.push({
+                            tagName: el.tagName,
+                            className: cls,
+                            w: Math.round(rect.width),
+                            h: Math.round(rect.height),
+                            children: el.children.length
+                        });
+                    }
+                }
+                return results.slice(0, 30);
+            })())"""
+        )
+
+        if result:
+            for el in result:
+                print(f"  {el['tagName']} {el['w']}x{el['h']} ({el['children']} children)")
+                print(f"    Class: {el['className']}")
+        else:
+            print("  None found")
+
+        print("\n" + "=" * 60)
         print("INSPECTION COMPLETE")
-        print("="*60)
-        print("\nUse these findings to update DOMHelper selectors in dom_helper.py")
+        print("=" * 60)
+        print("\nUse these findings to update DOMHelper selectors in src/dom_helper.py")
 
     except Exception as e:
         print(f"Error: {e}")
@@ -228,10 +246,10 @@ async def inspect_trae_dom():
 
 if __name__ == "__main__":
     print("Trae DOM Inspector")
-    print("="*60)
+    print("=" * 60)
     print("Make sure Trae is running with CDP enabled on port 9230")
     print("Run: ./scripts/start_trae.sh")
-    print("="*60)
+    print("=" * 60)
     print()
 
     asyncio.run(inspect_trae_dom())

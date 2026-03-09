@@ -81,18 +81,16 @@ async def ensure_connection():
     global cdp_client, dom_helper
 
     # Check if connection is established and active
-    if cdp_client is not None:
-        # Check if websocket exists and is not closed
-        if cdp_client.ws is not None and not cdp_client.ws.closed:
-            return  # Connection is active
+    if cdp_client is not None and cdp_client.is_connected:
+        return  # Connection is active
 
     # Try to establish or re-establish connection
     try:
         logger.info("Establishing CDP connection...")
 
-        # Clean up existing connection if it exists but is closed
-        if cdp_client is not None and cdp_client.ws is not None and cdp_client.ws.closed:
-            logger.warning("CDP connection was closed, attempting to reconnect...")
+        # Clean up existing connection if it exists but is disconnected
+        if cdp_client is not None and not cdp_client.is_connected:
+            logger.warning("CDP connection was lost, attempting to reconnect...")
             cdp_client = None
             dom_helper = None
 
@@ -139,8 +137,7 @@ async def health_check():
 
     connected = (
         cdp_client is not None and
-        cdp_client.ws is not None and
-        not cdp_client.ws.closed
+        cdp_client.is_connected
     )
 
     return HealthResponse(

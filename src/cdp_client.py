@@ -18,10 +18,30 @@ class CDPClient:
 
     def __init__(self, cdp_port: int = 9230):
         self.cdp_port = cdp_port
-        self.ws: Optional[websockets.WebSocketClientProtocol] = None
+        self.ws = None  # websockets connection (ClientConnection in v16+)
         self.message_id = 0
         self.pending_commands: dict[int, asyncio.Future] = {}
         self._listener_task: Optional[asyncio.Task] = None
+
+    @property
+    def is_connected(self) -> bool:
+        """Check if WebSocket is connected (compatible with websockets 14-16+)"""
+        if self.ws is None:
+            return False
+        # websockets 16.0+: use .state
+        if hasattr(self.ws, 'state'):
+            try:
+                from websockets.protocol import State
+                return self.ws.state == State.OPEN
+            except ImportError:
+                pass
+        # websockets < 16: use .closed
+        if hasattr(self.ws, 'closed'):
+            return not self.ws.closed
+        # websockets 14+: use .open
+        if hasattr(self.ws, 'open'):
+            return self.ws.open
+        return False
 
     async def connect(self) -> None:
         """Connect to Trae's CDP endpoint"""
