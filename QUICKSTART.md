@@ -182,6 +182,9 @@ python scripts/test_system.py
 
 # Component tests (requires Trae with CDP)
 python scripts/test_bridge.py
+
+# E2E tests (verify full flow)
+python scripts/test_e2e.py
 ```
 
 ## Troubleshooting
