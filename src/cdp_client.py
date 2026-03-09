@@ -150,8 +150,14 @@ class CDPClient:
             }
         )
 
-        if "result" in result and "value" in result["result"]:
-            return result["result"]["value"]
+        # Handle CDP response structure: {result: {type: ..., value: ..., description: ...}}
+        if "result" in result:
+            inner_result = result["result"]
+            if isinstance(inner_result, dict):
+                if "value" in inner_result:
+                    return inner_result["value"]
+                elif "description" in inner_result:
+                    return inner_result["description"]
 
         return None
 

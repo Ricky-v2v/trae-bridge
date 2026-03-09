@@ -14,9 +14,13 @@ logger = logging.getLogger(__name__)
 class DOMHelper:
     """Helper for DOM operations in Trae"""
 
-    # Selectors - these may need to be adjusted based on Trae's actual DOM structure
-    # These are common patterns used by chat applications
+    # Selectors - Updated for Trae's specific DOM structure
 
+    # Trae-specific selectors (discovered via inspection)
+    SELECTOR_TRAE_CHAT_INPUT = 'div.chat-input-v2-input-box-editable[role="textbox"][contenteditable="true"]'
+    SELECTOR_TRAE_TEXTAREA = 'textarea.inputarea.monaco-mouse-cursor-text[role="textbox"]'
+
+    # Fallback generic selectors
     SELECTOR_INPUT = '[contenteditable="true"]'
     SELECTOR_TEXTAREA = 'textarea'
     SELECTOR_SEND_BUTTON = 'button[type="submit"], button[aria-label*="send"], button[aria-label*="Send"]'
@@ -39,22 +43,31 @@ class DOMHelper:
         Returns:
             Selector string or None if not found
         """
-        # Try various selector strategies
+        # Try Trae-specific selectors first, then fallback to generic ones
         selectors = [
+            self.SELECTOR_TRAE_CHAT_INPUT,
+            self.SELECTOR_TRAE_TEXTAREA,
             self.SELECTOR_INPUT,
             self.SELECTOR_TEXTAREA,
             'input[type="text"]',
-            '[placeholder*="message" i], [placeholder*="chat" i]',
+            '[placeholder*="message" i], [placeholder*="chat" i], [placeholder*="聊天" i]',
             '[role="textbox"]'
         ]
 
         for selector in selectors:
             try:
                 result = await self.cdp.evaluate(
-                    f"""() => {{
+                    f"""((() => {{
                         const el = document.querySelector('{selector}');
-                        return el ? '{{"found": true, "tagName": el.tagName, "placeholder": el.placeholder || ""}}' : null;
-                    }}"""
+                        if (!el) return null;
+                        return {{
+                            found: true,
+                            tagName: el.tagName,
+                            placeholder: el.placeholder || "",
+                            className: el.className || "",
+                            role: el.getAttribute('role') || ""
+                        }};
+                    }})())"""
                 )
 
                 if result and result.get("found"):
@@ -86,10 +99,16 @@ class DOMHelper:
         for selector in selectors:
             try:
                 result = await self.cdp.evaluate(
-                    f"""() => {{
+                    f"""((() => {{
                         const el = document.querySelector('{selector}');
-                        return el ? '{{"found": true, "text": el.textContent || ""}}' : null;
-                    }}"""
+                        if (!el) return null;
+                        return {{
+                            found: true,
+                            text: el.textContent || "",
+                            className: el.className || "",
+                            ariaLabel: el.getAttribute('aria-label') || ""
+                        }};
+                    }})())"""
                 )
 
                 if result and result.get("found"):
@@ -125,7 +144,7 @@ class DOMHelper:
 
             # Focus and input text
             await self.cdp.evaluate(
-                f"""() => {{
+                f"""((() => {{
                     const input = document.querySelector('{input_selector}');
                     if (!input) return false;
 
@@ -140,26 +159,26 @@ class DOMHelper:
                     }}
 
                     return true;
-                }}"""
+                }})())"""
             )
 
             # Find and click send button
             send_selector = await self.find_send_button()
             if send_selector:
                 await self.cdp.evaluate(
-                    f"""() => {{
+                    f"""((() => {{
                         const btn = document.querySelector('{send_selector}');
                         if (btn) {{
                             btn.click();
                             return true;
                         }}
                         return false;
-                    }}"""
+                    }})())"""
                 )
             else:
                 # Try pressing Enter as fallback
                 await self.cdp.evaluate(
-                    """() => {
+                    """((() => {
                         const input = document.activeElement;
                         if (input) {
                             input.dispatchEvent(new KeyboardEvent('keydown', {
@@ -171,7 +190,7 @@ class DOMHelper:
                             return true;
                         }
                         return false;
-                    }"""
+                    }})())"""
                 )
 
             logger.info(f"Message sent successfully: {message[:50]}...")
@@ -190,7 +209,7 @@ class DOMHelper:
         """
         try:
             result = await self.cdp.evaluate(
-                """() => {
+                """((() => {
                     // Try different strategies to find messages
                     const selectors = [
                         '[class*="message"]',
@@ -226,7 +245,7 @@ class DOMHelper:
                         className: last.className || '',
                         isComplete: !document.querySelector('[class*="thinking"], [class*="loading"], [class*="typing"]')
                     };
-                }"""
+                }})())"""
             )
 
             if result:
@@ -288,7 +307,7 @@ class DOMHelper:
         try:
             # Try various methods to start a new chat
             result = await self.cdp.evaluate(
-                """() => {
+                """((() => {
                     // Try to find new chat button
                     const selectors = [
                         'button[aria-label*="new" i]',
@@ -316,7 +335,7 @@ class DOMHelper:
                     }));
 
                     return true;
-                }"""
+                }})())"""
             )
 
             logger.info("New chat initiated")
@@ -335,7 +354,7 @@ class DOMHelper:
         """
         try:
             result = await self.cdp.evaluate(
-                """() => {
+                """((() => {
                     const selectors = [
                         '[class*="message"]',
                         '[class*="chat"] > div',
@@ -357,7 +376,7 @@ class DOMHelper:
                     }
 
                     return messages;
-                }"""
+                }})())"""
             )
 
             if isinstance(result, list):
