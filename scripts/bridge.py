@@ -79,7 +79,7 @@ def main():
     logger.info("")
 
     try:
-        run_server(host=args.host, port=args.port)
+        run_server(host=args.host, port=args.port, cdp_port_param=args.cdp_port)
     except KeyboardInterrupt:
         logger.info("Shutting down...")
     except Exception as e:

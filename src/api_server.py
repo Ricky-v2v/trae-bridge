@@ -63,10 +63,17 @@ app = FastAPI(
 
 cdp_client: Optional[CDPClient] = None
 dom_helper: Optional[DOMHelper] = None
+cdp_port: int = 9230  # Default CDP port, can be configured
 
 # Task management for async requests
 tasks: dict[str, dict] = {}
 task_counter = 0
+
+
+def configure_cdp_port(port: int):
+    """Configure the CDP port for Trae connection"""
+    global cdp_port
+    cdp_port = port
 
 
 async def ensure_connection():
@@ -89,8 +96,8 @@ async def ensure_connection():
             cdp_client = None
             dom_helper = None
 
-        # Create new connection
-        cdp_client = CDPClient(cdp_port=9230)
+        # Create new connection with configured port
+        cdp_client = CDPClient(cdp_port=cdp_port)
         await cdp_client.connect()
         dom_helper = DOMHelper(cdp_client)
         logger.info("CDP connection established successfully")
@@ -389,15 +396,20 @@ async def get_history():
         )
 
 
-def run_server(host: str = "127.0.0.1", port: int = 8765):
+def run_server(host: str = "127.0.0.1", port: int = 8765, cdp_port_param: int = 9230):
     """
     Run the API server
 
     Args:
         host: Host to bind to
         port: Port to bind to
+        cdp_port_param: CDP port for Trae connection
     """
+    # Configure CDP port before starting server
+    configure_cdp_port(cdp_port_param)
+
     logger.info(f"Starting Trae Bridge API server on {host}:{port}")
+    logger.info(f"CDP port configured to: {cdp_port_param}")
 
     uvicorn.run(
         "src.api_server:app",
