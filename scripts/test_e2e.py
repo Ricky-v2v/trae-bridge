@@ -13,6 +13,7 @@ import requests
 import unittest
 import logging
 import json
+from typing import Optional
 
 # Configure logging
 logging.basicConfig(
@@ -21,13 +22,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Test configuration
-TEST_PORT = 8769
+# Test configuration from environment or defaults
+TEST_PORT = int(os.environ.get("TRAE_BRIDGE_TEST_PORT", 8769))
 BASE_URL = f"http://127.0.0.1:{TEST_PORT}"
-CDP_PORT = 9230
+CDP_PORT = int(os.environ.get("TRAE_CDP_PORT", 9230))
 
 
 class TestTraeBridgeE2E(unittest.TestCase):
+    # Class attributes for static analysis
+    server_process: Optional[subprocess.Popen] = None
+
     @classmethod
     def setUpClass(cls):
         """Start the API server for E2E testing"""
@@ -56,22 +60,28 @@ class TestTraeBridgeE2E(unittest.TestCase):
         )
 
         # Wait for server to be ready
-        max_retries = 10
+        max_retries = 15
         server_ready = False
         for i in range(max_retries):
+            # Check if process is still running
+            if cls.server_process.poll() is not None:
+                stdout, stderr = cls.server_process.communicate()
+                raise Exception(f"API server exited unexpectedly with code {cls.server_process.returncode}\nSTDOUT: {stdout}\nSTDERR: {stderr}")
+
             try:
                 resp = requests.get(f"{BASE_URL}/health", timeout=1)
                 if resp.status_code == 200:
                     server_ready = True
                     break
-            except:
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
                 pass
+            
             time.sleep(1)
             logger.info(f"Waiting for server... ({i+1}/{max_retries})")
 
         if not server_ready:
             cls.server_process.terminate()
-            raise Exception("API server failed to start")
+            raise Exception(f"API server failed to start on port {TEST_PORT} within {max_retries}s")
         
         logger.info("✓ API server ready")
 
