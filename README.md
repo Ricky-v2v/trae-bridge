@@ -44,6 +44,8 @@ cd trae-bridge
 2. Install dependencies:
 ```bash
 pip install -r requirements.txt
+# Or use the Makefile:
+make install
 ```
 
 ## Usage
@@ -61,7 +63,11 @@ Launch Trae with Chrome DevTools Protocol enabled:
 Start the bridge server in another terminal:
 
 ```bash
+# Using the script
 python scripts/bridge.py --log-level INFO
+
+# Or using the Makefile
+make run
 ```
 
 The API will be available at `http://127.0.0.1:8765` by default.
@@ -71,7 +77,11 @@ The API will be available at `http://127.0.0.1:8765` by default.
 Use the built-in interactive client for debugging:
 
 ```bash
+# Using the script
 python scripts/client.py chat
+
+# Or using the Makefile
+make client
 ```
 
 ## API Endpoints
@@ -98,7 +108,14 @@ Trae Bridge includes a comprehensive testing suite:
 
 Run all tests with:
 ```bash
-./scripts/test_all.sh  # (If implemented) or run manually
+# Run all tests (integration + system)
+make test
+
+# Run full test suite including E2E (requires Trae running)
+make test-all
+
+# Or use the test script directly
+./scripts/test_all.sh
 ```
 
 ## Advanced: DOM Search
