@@ -154,6 +154,11 @@ class DOMHelper:
             True if successful, False otherwise
         """
         try:
+            # Pre-inject completion observer BEFORE sending, to avoid race condition
+            # where response completes before observer is installed
+            self._response_finished_event.clear()
+            await self._inject_completion_observer()
+
             # Auto-detect input if not provided
             if not input_selector:
                 input_selector = self._cached_input_selector or await self.find_input_element()
@@ -391,7 +396,7 @@ class DOMHelper:
         text = " ".join([str(arg.get("value", "")) for arg in args if "value" in arg])
         
         if "TRAE_BRIDGE:FINISHED" in text:
-            # logger.info("Completion signal received from Trae UI (MutationObserver)")
+            logger.info("Completion signal received via MutationObserver")
             self._response_finished_event.set()
 
     async def _inject_completion_observer(self) -> bool:
@@ -435,6 +440,14 @@ class DOMHelper:
                 }
             });
             
+            // Auto-cleanup after 5 minutes to prevent memory leaks
+            setTimeout(() => {
+                if (window.traeBridgeObserver) {
+                    window.traeBridgeObserver.disconnect();
+                    window.traeBridgeObserver = null;
+                }
+            }, 5 * 60 * 1000);
+            
             observer.observe(document.body, { 
                 childList: true, 
                 subtree: true,
@@ -472,7 +485,9 @@ class DOMHelper:
         self._response_finished_event.clear()
         start_time = asyncio.get_event_loop().time()
         
-        # Phase 1: Inject observer
+        # Phase 1: Inject observer BEFORE we start waiting
+        # (Observer should ideally be injected even before send_message,
+        #  but we inject here as a fallback. send_message also pre-injects.)
         await self._inject_completion_observer()
 
         logger.info(f"Waiting for AI response (timeout: {timeout}s, event-driven)...")

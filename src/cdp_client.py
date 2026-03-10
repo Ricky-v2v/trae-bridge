@@ -22,6 +22,7 @@ class CDPClient:
         self.message_id = 0
         self.pending_commands: dict[int, asyncio.Future] = {}
         self._listener_task: Optional[asyncio.Task] = None
+        self._event_callbacks: dict[str, list[Callable]] = {}
 
     @property
     def is_connected(self) -> bool:
@@ -222,23 +223,19 @@ class CDPClient:
             logger.debug(f"CDP Console [{params.get('type')}]: {text}")
 
         # Dispatch event to callbacks
-        if hasattr(self, '_event_callbacks'):
-            for callback in self._event_callbacks.get(method, []):
-                try:
-                    if asyncio.iscoroutinefunction(callback):
-                        await callback(params)
-                    else:
-                        callback(params)
-                except Exception as e:
-                    logger.error(f"Error in event callback for {method}: {e}")
+        for callback in self._event_callbacks.get(method, []):
+            try:
+                if asyncio.iscoroutinefunction(callback):
+                    await callback(params)
+                else:
+                    callback(params)
+            except Exception as e:
+                logger.error(f"Error in event callback for {method}: {e}")
 
         logger.debug(f"CDP Event: {method}")
 
     def add_event_listener(self, method: str, callback: Callable) -> None:
         """Register a callback for a CDP event"""
-        if not hasattr(self, '_event_callbacks'):
-            self._event_callbacks: dict[str, list[Callable]] = {}
-        
         if method not in self._event_callbacks:
             self._event_callbacks[method] = []
         
