@@ -168,6 +168,27 @@ def start_new_chat():
         return False
 
 
+def switch_model(model_name: str) -> bool:
+    """Switch the active AI model"""
+    print_section(f"Switching Model ({model_name})")
+
+    try:
+        response = requests.post(f"{API_URL}/model", json={"model": model_name})
+        data = response.json()
+
+        if response.status_code == 200:
+            print(f"✓ Model switched successfully: {data['model']}")
+            return True
+        else:
+            print(f"✗ Failed to switch model:")
+            print(f"  {data.get('detail', data)}")
+            return False
+
+    except requests.exceptions.RequestException as e:
+        print(f"✗ Connection error: {e}")
+        return False
+
+
 def list_models():
     """List available AI models"""
     print_section("Available Models")
@@ -258,6 +279,11 @@ def main():
             start_new_chat()
         elif command == "models":
             list_models()
+        elif command == "model":
+            if len(sys.argv) > 2:
+                switch_model(" ".join(sys.argv[2:]))
+            else:
+                print("Usage: python client.py model <model_name>")
         elif command == "interactive":
             if check_health():
                 interactive_mode()
@@ -305,11 +331,13 @@ Commands:
   history             - Get chat history
   new                 - Start a new chat session
   models              - List available models
+  model <name>        - Switch to a specific model
   interactive         - Start interactive chat mode
 
 Examples:
   python scripts/client.py health
   python scripts/client.py chat "Hello, Trae!"
+  python scripts/client.py model "Claude 3.5 Sonnet"
   python scripts/client.py async "Explain quantum computing"
   python scripts/client.py interactive
     """)

@@ -350,12 +350,14 @@ async def switch_model(request: ModelSwitchRequest):
     await ensure_connection()
 
     try:
-        # This is a placeholder - actual model switching would require:
-        # 1. Finding the model selector in Trae's UI
-        # 2. Clicking it and selecting the desired model
-        # 3. Waiting for the switch to complete
-
         logger.info(f"Model switching requested: {request.model}")
+        
+        success = await dom_helper.switch_model(request.model)
+        if not success:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to apply model switch in UI. Is '{request.model}' available?"
+            )
 
         return {
             "status": "success",
@@ -363,6 +365,8 @@ async def switch_model(request: ModelSwitchRequest):
             "model": request.model
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error switching model: {e}")
         raise HTTPException(

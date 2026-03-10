@@ -651,3 +651,97 @@ class DOMHelper:
         except Exception as e:
             logger.error(f"Failed to get chat history: {e}")
             return []
+
+    async def switch_model(self, model_name: str) -> bool:
+        """
+        Switch to a specific AI model via Trae UI.
+        
+        Args:
+            model_name: The name of the model to select (e.g., 'Claude', 'GPT-4')
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # 1. Click the model selector trigger button
+            logger.info("Opening model selector dropdown...")
+            opened = await self.cdp.evaluate(
+                """((() => {
+                    const trigger = document.querySelector('button.icd-model-select-trigger');
+                    if (trigger) {
+                        trigger.click();
+                        return true;
+                    }
+                    return false;
+                })())"""
+            )
+            
+            if not opened:
+                logger.error("Could not find model selector trigger button")
+                return False
+                
+            # Wait for dropdown animation
+            await asyncio.sleep(0.5)
+            
+            # 2. Find and click the target model
+            logger.info(f"Looking for model: {model_name}")
+            escaped_model = model_name.replace("'", "\\'").lower().replace(" ", "")
+            
+            clicked = await self.cdp.evaluate(
+                f"""((() => {{
+                    // Try to find the element containing the model name
+                    const targetText = '{escaped_model}';
+                    
+                    const walker = document.createTreeWalker(
+                        document.body,
+                        NodeFilter.SHOW_TEXT,
+                        {{
+                            acceptNode: (node) => {{
+                                if (!node.parentElement) return NodeFilter.FILTER_REJECT;
+                                const style = window.getComputedStyle(node.parentElement);
+                                if (style.display === 'none' || style.visibility === 'hidden') {{
+                                    return NodeFilter.FILTER_REJECT;
+                                }}
+                                const text = node.textContent.toLowerCase().replace(/\\s+/g, '');
+                                if (text.includes(targetText)) {{
+                                    return NodeFilter.FILTER_ACCEPT;
+                                }}
+                                return NodeFilter.FILTER_REJECT;
+                            }}
+                        }}
+                    );
+                    
+                    let targetNode = walker.nextNode();
+                    if (targetNode && targetNode.parentElement) {{
+                        // Click the parent element (usually a span)
+                        targetNode.parentElement.click();
+                        
+                        // We also dispatch a mousedown event just in case
+                        targetNode.parentElement.dispatchEvent(new MouseEvent('mousedown', {{
+                            bubbles: true,
+                            cancelable: true,
+                            view: window
+                        }}));
+                        
+                        return true;
+                    }}
+                    return false;
+                }})())"""
+            )
+            
+            if clicked:
+                logger.info(f"Successfully clicked model matching '{model_name}'")
+                await asyncio.sleep(0.5) # Wait for UI to update
+                return True
+            else:
+                logger.warning(f"Could not find model matching '{model_name}' in dropdown")
+                
+                # Close dropdown since we failed
+                await self.cdp.evaluate("document.body.click();")
+                await asyncio.sleep(0.2)
+                return False
+                
+        except Exception as e:
+            logger.error(f"Failed to switch model: {e}")
+            return False
+
