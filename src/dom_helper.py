@@ -399,66 +399,72 @@ class DOMHelper:
             logger.info("Completion signal received via MutationObserver")
             self._response_finished_event.set()
 
-    async def _inject_completion_observer(self) -> bool:
+    async def _inject_completion_observer(self, force_reinject: bool = True) -> bool:
         """Inject a MutationObserver to watch for response completion"""
         logger.debug("Injecting MutationObserver for completion detection...")
-        
+
         # This script watches for the appearance and subsequent disappearance
         # of the "stop generating" button which signals the end of a turn.
-        script = """((() => {
-            if (window.traeBridgeObserver) {
+        skip_reinject = "false" if force_reinject else "true"
+        script = f"""((() => {{
+            const skipIfInjected = {skip_reinject};
+
+            if (window.traeBridgeObserver) {{
+                if (skipIfInjected) {{
+                    return true; // Already injected and not forcing reinject
+                }}
                 window.traeBridgeObserver.disconnect();
-            }
-            
+            }}
+
             console.log('TRAE_BRIDGE:OBSERVER_START');
-            
-            let stopButtonSeen = false;
-            
-            const findStopButton = () => {
+
+            const findStopButton = () => {{
                 // Look for common patterns of the stop/generating button
-                return document.querySelector('[class*="stop-button"]') || 
+                return document.querySelector('[class*="stop-button"]') ||
                        document.querySelector('button[aria-label*="Stop"]') ||
                        document.querySelector('.generating');
-            };
+            }};
 
-            const observer = new MutationObserver(() => {
+            let stopButtonSeen = !!findStopButton();
+
+            const observer = new MutationObserver(() => {{
                 const stopBtn = findStopButton();
-                
-                if (stopBtn) {
+
+                if (stopBtn) {{
                     stopButtonSeen = true;
-                } else if (stopButtonSeen) {
+                }} else if (stopButtonSeen) {{
                     // It was there, now it's gone!
                     // Wait a tiny bit to ensure it doesn't flicker or move
-                    setTimeout(() => {
+                    setTimeout(() => {{
                         const stillGone = !findStopButton();
-                        if (stillGone) {
+                        if (stillGone) {{
                             console.log('TRAE_BRIDGE:FINISHED');
                             observer.disconnect();
                             window.traeBridgeObserver = null;
-                        }
-                    }, 500);
-                }
-            });
-            
+                        }}
+                    }}, 500);
+                }}
+            }});
+
             // Auto-cleanup after 5 minutes to prevent memory leaks
-            setTimeout(() => {
-                if (window.traeBridgeObserver) {
+            setTimeout(() => {{
+                if (window.traeBridgeObserver) {{
                     window.traeBridgeObserver.disconnect();
                     window.traeBridgeObserver = null;
-                }
-            }, 5 * 60 * 1000);
-            
-            observer.observe(document.body, { 
-                childList: true, 
+                }}
+            }}, 5 * 60 * 1000);
+
+            observer.observe(document.body, {{
+                childList: true,
                 subtree: true,
                 attributes: true,
                 attributeFilter: ['class', 'disabled']
-            });
-            
+            }});
+
             window.traeBridgeObserver = observer;
             return true;
-        })())"""
-        
+        }})())"""
+
         return await self.cdp.evaluate(script)
 
     async def wait_for_response(
@@ -480,15 +486,17 @@ class DOMHelper:
             poll_interval: Polling interval for fallback
 
         Returns:
+        Returns:
             Response text or None if timeout
         """
-        self._response_finished_event.clear()
+        # We do NOT clear the event here: send_message clears it.
+        # If the response was super fast, the event might be set already!
+        # If we clear it here, we'd dead-lock waiting for an event that already fired.
+        
         start_time = asyncio.get_event_loop().time()
         
-        # Phase 1: Inject observer BEFORE we start waiting
-        # (Observer should ideally be injected even before send_message,
-        #  but we inject here as a fallback. send_message also pre-injects.)
-        await self._inject_completion_observer()
+        # Phase 1: Ensure observer is injected (but don't overwrite if it's already there)
+        await self._inject_completion_observer(force_reinject=False)
 
         logger.info(f"Waiting for AI response (timeout: {timeout}s, event-driven)...")
 
