@@ -313,25 +313,15 @@ async def new_chat():
 async def list_models():
     """
     List available models
-
-    Returns a list of models available in Trae
+    
+    Returns a list of actual models dynamically queried from Trae UI
     """
     await ensure_connection()
-
+    
     try:
-        # This is a placeholder - actual model detection would require inspecting Trae's UI
-        # Common models that might be available
-        models = [
-            "claude-3-5-sonnet",
-            "claude-3-opus",
-            "claude-3-haiku",
-            "gpt-4",
-            "gpt-4-turbo",
-            "gpt-3.5-turbo"
-        ]
-
+        models = await dom_helper.get_available_models()
         return ModelsResponse(models=models)
-
+        
     except Exception as e:
         logger.error(f"Error listing models: {e}")
         raise HTTPException(

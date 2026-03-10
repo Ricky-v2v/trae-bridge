@@ -719,13 +719,39 @@ class DOMHelper:
                         }}
                     );
                     
-                    let targetNode = walker.nextNode();
-                    if (targetNode && targetNode.parentElement) {{
+                    let bestNode = null;
+                    let bestScore = -1;
+                    
+                    let node;
+                    while ((node = walker.nextNode())) {{
+                        // Ignore the trigger button itsel
+                        if (node.parentElement.closest && node.parentElement.closest('.icd-model-select-trigger')) {{
+                            continue;
+                        }}
+                        
+                        const text = node.textContent.toLowerCase().replace(/\\s+/g, '');
+                        
+                        let score = 0;
+                        if (text === targetText) {{
+                            score = 100; // Exact match (ignoring case/spaces) is highest priority
+                        }} else if (text.startsWith(targetText)) {{
+                            score = 50;  // Starts-with is second
+                        }} else {{
+                            score = 10;  // Includes is fallback
+                        }}
+                        
+                        if (score > bestScore) {{
+                            bestScore = score;
+                            bestNode = node;
+                        }}
+                    }}
+                    
+                    if (bestNode && bestNode.parentElement) {{
                         // Click the parent element (usually a span)
-                        targetNode.parentElement.click();
+                        bestNode.parentElement.click();
                         
                         // We also dispatch a mousedown event just in case
-                        targetNode.parentElement.dispatchEvent(new MouseEvent('mousedown', {{
+                        bestNode.parentElement.dispatchEvent(new MouseEvent('mousedown', {{
                             bubbles: true,
                             cancelable: true,
                             view: window
@@ -753,3 +779,55 @@ class DOMHelper:
             logger.error(f"Failed to switch model: {e}")
             return False
 
+    async def get_available_models(self) -> list[str]:
+        """
+        Dynamically query actual available models from the Trae UI dropdown.
+        """
+        try:
+            # Click to open dropdown
+            opened = await self.cdp.evaluate(
+                """((() => {
+                    const trigger = document.querySelector('button.icd-model-select-trigger');
+                    if (trigger) {
+                        trigger.click();
+                        return true;
+                    }
+                    return false;
+                })())"""
+            )
+            
+            if not opened:
+                logger.error("Could not find model selector trigger button to list models")
+                return []
+                
+            await asyncio.sleep(0.5)
+            
+            models = await self.cdp.evaluate("""((() => {
+                const els = document.querySelectorAll('div[class*="portal"] span, div[class*="dropdown"] span, div[class*="menu"] span');
+                const results = [];
+                const seen = new Set();
+                for (const el of els) {
+                    const txt = el.textContent.trim();
+                    // Filter out purely UI texts or short things like "Beta", counts, or headers
+                    if (txt.length >= 2 && txt.length < 40 && txt !== 'Beta' && !txt.includes('requests') && !txt.includes('复制') && !txt.includes('第') && !txt.includes('模型') && !txt.includes('⌘')) {
+                        if (!seen.has(txt)) {
+                            seen.add(txt);
+                            results.push(txt);
+                        }
+                    }
+                }
+                return results;
+            })())""")
+            
+            # Close dropdown
+            await self.cdp.evaluate("document.body.click();")
+            await asyncio.sleep(0.2)
+            
+            if isinstance(models, list):
+                return [m for m in models if m]
+                
+            return []
+            
+        except Exception as e:
+            logger.error(f"Failed to get available models: {e}")
+            return []
