@@ -213,10 +213,36 @@ class CDPClient:
     async def _handle_event(self, event: dict[str, Any]) -> None:
         """Handle CDP events"""
         method = event.get("method", "")
+        params = event.get("params", {})
 
-        # Can be extended to handle specific events
-        # For example, DOM mutations, console messages, etc.
+        # Log console messages for debugging
+        if method == "Runtime.consoleAPICalled":
+            args = params.get("args", [])
+            text = " ".join([str(arg.get("value", "")) for arg in args if "value" in arg])
+            logger.debug(f"CDP Console [{params.get('type')}]: {text}")
+
+        # Dispatch event to callbacks
+        if hasattr(self, '_event_callbacks'):
+            for callback in self._event_callbacks.get(method, []):
+                try:
+                    if asyncio.iscoroutinefunction(callback):
+                        await callback(params)
+                    else:
+                        callback(params)
+                except Exception as e:
+                    logger.error(f"Error in event callback for {method}: {e}")
+
         logger.debug(f"CDP Event: {method}")
+
+    def add_event_listener(self, method: str, callback: Callable) -> None:
+        """Register a callback for a CDP event"""
+        if not hasattr(self, '_event_callbacks'):
+            self._event_callbacks: dict[str, list[Callable]] = {}
+        
+        if method not in self._event_callbacks:
+            self._event_callbacks[method] = []
+        
+        self._event_callbacks[method].append(callback)
 
 
 class CDPError(Exception):

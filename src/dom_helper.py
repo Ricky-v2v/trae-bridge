@@ -11,7 +11,7 @@ Selectors are based on Trae's actual DOM structure (as of 2026-03):
 
 import asyncio
 import logging
-from typing import Optional
+from typing import Optional, Any
 from .cdp_client import CDPClient
 
 logger = logging.getLogger(__name__)
@@ -59,6 +59,11 @@ class DOMHelper:
         self.cdp = cdp_client
         self._cached_input_selector: Optional[str] = None
         self._cached_send_selector: Optional[str] = None
+        self._response_finished_event = asyncio.Event()
+        
+        # Register for console events to catch our custom completion signal
+        self.cdp.add_event_listener("Runtime.consoleAPICalled", self._handle_console_event)
+
 
     async def find_input_element(self) -> Optional[str]:
         """
@@ -380,105 +385,128 @@ class DOMHelper:
             logger.error(f"Failed to get last AI message: {e}")
             return None
 
+    async def _handle_console_event(self, params: dict[str, Any]) -> None:
+        """Handle console events from CDP to detect completion signals"""
+        args = params.get("args", [])
+        text = " ".join([str(arg.get("value", "")) for arg in args if "value" in arg])
+        
+        if "TRAE_BRIDGE:FINISHED" in text:
+            # logger.info("Completion signal received from Trae UI (MutationObserver)")
+            self._response_finished_event.set()
+
+    async def _inject_completion_observer(self) -> bool:
+        """Inject a MutationObserver to watch for response completion"""
+        logger.debug("Injecting MutationObserver for completion detection...")
+        
+        # This script watches for the appearance and subsequent disappearance
+        # of the "stop generating" button which signals the end of a turn.
+        script = """((() => {
+            if (window.traeBridgeObserver) {
+                window.traeBridgeObserver.disconnect();
+            }
+            
+            console.log('TRAE_BRIDGE:OBSERVER_START');
+            
+            let stopButtonSeen = false;
+            
+            const findStopButton = () => {
+                // Look for common patterns of the stop/generating button
+                return document.querySelector('[class*="stop-button"]') || 
+                       document.querySelector('button[aria-label*="Stop"]') ||
+                       document.querySelector('.generating');
+            };
+
+            const observer = new MutationObserver(() => {
+                const stopBtn = findStopButton();
+                
+                if (stopBtn) {
+                    stopButtonSeen = true;
+                } else if (stopButtonSeen) {
+                    // It was there, now it's gone!
+                    // Wait a tiny bit to ensure it doesn't flicker or move
+                    setTimeout(() => {
+                        const stillGone = !findStopButton();
+                        if (stillGone) {
+                            console.log('TRAE_BRIDGE:FINISHED');
+                            observer.disconnect();
+                            window.traeBridgeObserver = null;
+                        }
+                    }, 500);
+                }
+            });
+            
+            observer.observe(document.body, { 
+                childList: true, 
+                subtree: true,
+                attributes: true,
+                attributeFilter: ['class', 'disabled']
+            });
+            
+            window.traeBridgeObserver = observer;
+            return true;
+        })())"""
+        
+        return await self.cdp.evaluate(script)
+
     async def wait_for_response(
         self,
         timeout: float = 180.0,
         poll_interval: float = 1.0
     ) -> Optional[str]:
         """
-        Wait for AI response to complete.
+        Wait for AI response to complete using an event-driven approach.
 
         Strategy:
-        1. Record the current number of assistant turns
-        2. Wait for a new assistant turn to appear (AI started responding)
-        3. Then wait for the AI to finish generating (stop button disappears)
-        4. Extract the response text
+        1. Reset the completion event
+        2. Inject a MutationObserver that logs when the response is finished
+        3. Wait for the event OR a timeout
+        4. Provide polling fallback if event doesn't trigger
 
         Args:
             timeout: Maximum time to wait in seconds
-            poll_interval: Time between polls in seconds
+            poll_interval: Polling interval for fallback
 
         Returns:
             Response text or None if timeout
         """
+        self._response_finished_event.clear()
         start_time = asyncio.get_event_loop().time()
-        initial_turn_count = await self._count_assistant_turns()
+        
+        # Phase 1: Inject observer
+        await self._inject_completion_observer()
 
-        logger.info(
-            f"Waiting for AI response (timeout: {timeout}s, "
-            f"current assistant turns: {initial_turn_count})..."
-        )
+        logger.info(f"Waiting for AI response (timeout: {timeout}s, event-driven)...")
 
-        # Phase 1: Wait for a new assistant turn to appear
-        new_turn_detected = False
-        while True:
-            elapsed = asyncio.get_event_loop().time() - start_time
-            if elapsed >= timeout:
-                logger.warning(f"Timeout waiting for AI to start responding after {elapsed:.1f}s")
-                return None
+        try:
+            # Wait for the event with timeout
+            await asyncio.wait_for(self._response_finished_event.wait(), timeout=timeout)
+            logger.info("Event-driven completion detected!")
+        except asyncio.TimeoutError:
+            logger.warning(f"Event-driven completion timed out after {timeout}s, falling back to polling...")
+            
+            # Fallback to polling to be safe
+            remaining_timeout = 10.0 # Small buffer for polling fallback
+            polling_start = asyncio.get_event_loop().time()
+            
+            while True:
+                elapsed = asyncio.get_event_loop().time() - polling_start
+                if elapsed >= remaining_timeout:
+                    break
+                
+                is_generating = await self._is_ai_generating()
+                if not is_generating:
+                    logger.info("Polling fallback detected completion")
+                    break
+                
+                await asyncio.sleep(poll_interval)
 
-            current_count = await self._count_assistant_turns()
-            if current_count > initial_turn_count:
-                new_turn_detected = True
-                logger.info(f"New assistant turn detected (turn #{current_count})")
-                break
+        # Extraction phase (same as before but more confident)
+        message = await self.get_last_ai_message()
+        if message:
+            return message.get("text") or message.get("markdownText")
+        
+        return None
 
-            # Also check if AI is already generating (in case turn count didn't change)
-            is_generating = await self._is_ai_generating()
-            if is_generating:
-                new_turn_detected = True
-                logger.info("AI is generating (detected via generating state)")
-                break
-
-            await asyncio.sleep(poll_interval)
-
-        # Phase 2: Wait for AI to finish generating
-        # Use adaptive polling: start fast, slow down over time
-        stable_count = 0
-        last_text_len = 0
-
-        while True:
-            elapsed = asyncio.get_event_loop().time() - start_time
-            if elapsed >= timeout:
-                logger.warning(f"Timeout waiting for response completion after {elapsed:.1f}s")
-                # Still try to return what we have
-                message = await self.get_last_ai_message()
-                if message:
-                    return message.get("text") or message.get("markdownText")
-                return None
-
-            is_generating = await self._is_ai_generating()
-
-            if not is_generating:
-                # AI might have finished, but let's verify with text stability
-                message = await self.get_last_ai_message()
-                if message:
-                    current_text_len = len(message.get("text", ""))
-                    if current_text_len == last_text_len and current_text_len > 0:
-                        stable_count += 1
-                    else:
-                        stable_count = 0
-                        last_text_len = current_text_len
-
-                    # Consider complete after 2 consecutive stable checks
-                    if stable_count >= 2:
-                        text = message.get("markdownText") or message.get("text", "")
-                        logger.info(f"Response complete: {len(text)} characters")
-                        return text
-            else:
-                stable_count = 0
-                # Update text length while generating
-                message = await self.get_last_ai_message()
-                if message:
-                    last_text_len = len(message.get("text", ""))
-
-            # Adaptive polling: faster initially, slower after a while
-            if elapsed < 10:
-                await asyncio.sleep(0.5)
-            elif elapsed < 30:
-                await asyncio.sleep(1.0)
-            else:
-                await asyncio.sleep(2.0)
 
     async def new_chat(self) -> bool:
         """
