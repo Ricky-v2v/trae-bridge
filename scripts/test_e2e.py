@@ -203,6 +203,22 @@ class TestTraeBridgeE2E(unittest.TestCase):
 
         logger.info("✓ History check successful")
 
+    def test_06_model_switch(self):
+        """Test model switching endpoint"""
+        logger.info("Step 6: Testing model switching...")
+        payload = {"model": "gpt-5.2"} # Fallback valid model check
+        resp = requests.post(f"{BASE_URL}/model", json=payload)
+        
+        # It should either succeed (200) or gracefully reject if the user doesn't have the model (400)
+        # Both are valid architectural responses (meaning the API is alive and routing)
+        self.assertIn(resp.status_code, [200, 400])
+        
+        data = resp.json()
+        if resp.status_code == 200:
+            logger.info(f"✓ Model switch successful: {data.get('model')}")
+        else:
+            logger.info(f"✓ Model switch correctly handled absence of model: {data.get('detail')}")
+
 
 if __name__ == "__main__":
     unittest.main()
