@@ -46,8 +46,8 @@ python scripts/inspect_dom.py    # Dump Trae's DOM for selector research
    - Executes JS via `Runtime.evaluate` (using IIFE syntax).
 
 2. **DOM Helper** (`src/dom_helper.py`)
-   - **Send Strategy**: Clear input → `execCommand('insertText')` → wait for enabled send button → Click.
-   - **Wait Strategy**: Wait for new assistant turn → Poll until "stop button" disappears + text is stable.
+   - **Send Strategy**: Clear input → pre-inject MutationObserver → `execCommand('insertText')` → wait for enabled send button → Click.
+   - **Wait Strategy**: Injects a MutationObserver to watch for the "stop generating" button disappearance, firing a JS console event (`TRAE_BRIDGE:FINISHED`) for O(1) detection, with a polling fallback.
    - **History**: Extracts from `chat-turn assistant` and `chat-turn user`.
 
 3. **API Server** (`src/api_server.py`)
@@ -63,8 +63,8 @@ Always use the IIFE pattern for `Runtime.evaluate`:
 await cdp.evaluate("((() => { /* code */ return result; })())")
 ```
 
-### Selective Polling
-When waiting for responses, use `is_generating` as the primary signal. If the "stop" button is visible, the AI is producing text. Stable text length is a secondary confirmation.
+### Event-Driven Completion (MutationObserver)
+Instead of polling the DOM constantly, the bridge injects a `MutationObserver` that emits a `console.log` event when the "stop generating" button disappears. The `CDPClient` intercepts this console log and resolves the wait immediately. Polling is only used as a fallback if the event times out.
 
 ### CDP Versioning
 If `websockets` library is updated, check `CDPClient.is_connected` property for compatibility.

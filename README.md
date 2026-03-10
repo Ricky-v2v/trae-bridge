@@ -9,6 +9,8 @@ Trae Bridge connects to the Trae Electron app using Chrome DevTools Protocol (CD
 ## Features
 
 - 🌉 **REST API** interface to Trae's AI models
+- 🚀 **Event-Driven Completion**: Uses MutationObserver for O(1) time complexity response detection (no DOM polling)
+- 🔌 **Persistent WebSocket**: Reuses CDP connection for minimal latency
 - ⚡ **Synchronous and Asynchronous** chat modes
 - 🔄 **Session Management**: Start new chats or switch models
 - 📊 **Chat History**: Retrieve full conversation history with role detection
