@@ -7,7 +7,10 @@
 CDP_PORT=9230
 
 # Find Trae application path (common locations)
+# Newer Trae builds use Electron as the real binary name.
 TRAE_PATHS=(
+  "/Applications/Trae.app/Contents/MacOS/Electron"
+  "$HOME/Applications/Trae.app/Contents/MacOS/Electron"
   "/Applications/Trae.app/Contents/MacOS/Trae"
   "$HOME/Applications/Trae.app/Contents/MacOS/Trae"
 )

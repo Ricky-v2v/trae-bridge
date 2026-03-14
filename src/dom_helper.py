@@ -660,121 +660,131 @@ class DOMHelper:
             logger.error(f"Failed to get chat history: {e}")
             return []
 
+    async def _open_model_selector(self) -> bool:
+        """Open the model selector using the interaction pattern required by current Trae UI."""
+        try:
+            opened = await self.cdp.evaluate(
+                """((() => {
+                    const trigger = document.querySelector('button.icd-model-select-trigger');
+                    if (!trigger) return false;
+
+                    trigger.focus();
+
+                    // Current Trae/Radix select opens reliably via keyboard interaction,
+                    // while plain click() often leaves aria-expanded=false.
+                    for (const [type, key, code, keyCode] of [
+                        ['keydown', 'ArrowDown', 'ArrowDown', 40],
+                        ['keyup', 'ArrowDown', 'ArrowDown', 40],
+                    ]) {
+                        trigger.dispatchEvent(new KeyboardEvent(type, {
+                            key,
+                            code,
+                            keyCode,
+                            which: keyCode,
+                            bubbles: true,
+                            cancelable: true,
+                        }));
+                    }
+
+                    return true;
+                })())"""
+            )
+
+            if not opened:
+                return False
+
+            await asyncio.sleep(0.6)
+
+            dropdown_visible = await self.cdp.evaluate(
+                """((() => {
+                    const root = document.querySelector('[role="listbox"], .icube-model-select-portal-content');
+                    if (!root) return false;
+                    const rect = root.getBoundingClientRect();
+                    return rect.width > 0 && rect.height > 0;
+                })())"""
+            )
+            return bool(dropdown_visible)
+        except Exception as e:
+            logger.error(f"Failed to open model selector: {e}")
+            return False
+
     async def switch_model(self, model_name: str) -> bool:
         """
         Switch to a specific AI model via Trae UI.
-        
+
         Args:
             model_name: The name of the model to select (e.g., 'Claude', 'GPT-4')
-            
+
         Returns:
             True if successful, False otherwise
         """
         try:
-            # 1. Click the model selector trigger button
             logger.info("Opening model selector dropdown...")
-            opened = await self.cdp.evaluate(
-                """((() => {
-                    const trigger = document.querySelector('button.icd-model-select-trigger');
-                    if (trigger) {
-                        trigger.click();
-                        return true;
-                    }
-                    return false;
-                })())"""
-            )
-            
+            opened = await self._open_model_selector()
+
             if not opened:
-                logger.error("Could not find model selector trigger button")
+                logger.error("Could not open model selector dropdown")
                 return False
-                
-            # Wait for dropdown animation
-            await asyncio.sleep(0.5)
-            
-            # 2. Find and click the target model
+
             logger.info(f"Looking for model: {model_name}")
-            escaped_model = model_name.replace("'", "\\'").lower().replace(" ", "")
-            
+            escaped_model = model_name.replace('\\', '\\\\').replace("'", "\\'")
+
             clicked = await self.cdp.evaluate(
                 f"""((() => {{
-                    // Try to find the element containing the model name
-                    const targetText = '{escaped_model}';
-                    
-                    const walker = document.createTreeWalker(
-                        document.body,
-                        NodeFilter.SHOW_TEXT,
-                        {{
-                            acceptNode: (node) => {{
-                                if (!node.parentElement) return NodeFilter.FILTER_REJECT;
-                                const style = window.getComputedStyle(node.parentElement);
-                                if (style.display === 'none' || style.visibility === 'hidden') {{
-                                    return NodeFilter.FILTER_REJECT;
-                                }}
-                                const text = node.textContent.toLowerCase().replace(/\\s+/g, '');
-                                if (text.includes(targetText)) {{
-                                    return NodeFilter.FILTER_ACCEPT;
-                                }}
-                                return NodeFilter.FILTER_REJECT;
-                            }}
-                        }}
-                    );
-                    
-                    let bestNode = null;
+                    const normalize = (s) => (s || '').toLowerCase().replace(/\\s+/g, '').trim();
+                    const target = normalize('{escaped_model}');
+                    const root = document.querySelector('[role="listbox"], .icube-model-select-portal-content');
+                    if (!root) return false;
+
+                    const items = Array.from(root.querySelectorAll('.icube-model-select-portal-model-item'));
+                    let best = null;
                     let bestScore = -1;
-                    
-                    let node;
-                    while ((node = walker.nextNode())) {{
-                        // Ignore the trigger button itsel
-                        if (node.parentElement.closest && node.parentElement.closest('.icd-model-select-trigger')) {{
-                            continue;
-                        }}
-                        
-                        const text = node.textContent.toLowerCase().replace(/\\s+/g, '');
-                        
-                        let score = 0;
-                        if (text === targetText) {{
-                            score = 100; // Exact match (ignoring case/spaces) is highest priority
-                        }} else if (text.startsWith(targetText)) {{
-                            score = 50;  // Starts-with is second
-                        }} else {{
-                            score = 10;  // Includes is fallback
-                        }}
-                        
+
+                    for (const item of items) {{
+                        const rect = item.getBoundingClientRect();
+                        if (rect.width === 0 || rect.height === 0) continue;
+
+                        const wrapper = item.querySelector('.icube-model-select-portal-model-item-wrapper');
+                        const rawText = (wrapper?.innerText || item.innerText || item.textContent || '').trim();
+                        const firstLine = rawText.split('\n')[0].trim();
+                        const normalized = normalize(firstLine);
+                        if (!normalized) continue;
+
+                        let score = -1;
+                        if (normalized === target) score = 300;
+                        else if (normalized.replace(/preview$/, '') === target.replace(/preview$/, '')) score = 250;
+                        else if (normalized.startsWith(target)) score = 200;
+                        else if (target.startsWith(normalized)) score = 180;
+                        else if (normalized.includes(target) || target.includes(normalized)) score = 120;
+
                         if (score > bestScore) {{
+                            best = item;
                             bestScore = score;
-                            bestNode = node;
                         }}
                     }}
-                    
-                    if (bestNode && bestNode.parentElement) {{
-                        // Click the parent element (usually a span)
-                        bestNode.parentElement.click();
-                        
-                        // We also dispatch a mousedown event just in case
-                        bestNode.parentElement.dispatchEvent(new MouseEvent('mousedown', {{
-                            bubbles: true,
-                            cancelable: true,
-                            view: window
-                        }}));
-                        
-                        return true;
-                    }}
-                    return false;
+
+                    if (!best || bestScore < 0) return false;
+
+                    best.scrollIntoView({{ block: 'center' }});
+
+                    best.dispatchEvent(new PointerEvent('pointerdown', {{ bubbles: true, cancelable: true, pointerType: 'mouse' }}));
+                    best.dispatchEvent(new MouseEvent('mousedown', {{ bubbles: true, cancelable: true, view: window, button: 0, buttons: 1 }}));
+                    best.dispatchEvent(new MouseEvent('mouseup', {{ bubbles: true, cancelable: true, view: window, button: 0, buttons: 1 }}));
+                    best.click();
+                    return true;
                 }})())"""
             )
-            
+
             if clicked:
                 logger.info(f"Successfully clicked model matching '{model_name}'")
-                await asyncio.sleep(0.5) # Wait for UI to update
+                await asyncio.sleep(0.8)
                 return True
-            else:
-                logger.warning(f"Could not find model matching '{model_name}' in dropdown")
-                
-                # Close dropdown since we failed
-                await self.cdp.evaluate("document.body.click();")
-                await asyncio.sleep(0.2)
-                return False
-                
+
+            logger.warning(f"Could not find model matching '{model_name}' in dropdown")
+            await self.cdp.evaluate("document.body.click();")
+            await asyncio.sleep(0.2)
+            return False
+
         except Exception as e:
             logger.error(f"Failed to switch model: {e}")
             return False
@@ -784,50 +794,41 @@ class DOMHelper:
         Dynamically query actual available models from the Trae UI dropdown.
         """
         try:
-            # Click to open dropdown
-            opened = await self.cdp.evaluate(
-                """((() => {
-                    const trigger = document.querySelector('button.icd-model-select-trigger');
-                    if (trigger) {
-                        trigger.click();
-                        return true;
-                    }
-                    return false;
-                })())"""
-            )
-            
+            opened = await self._open_model_selector()
+
             if not opened:
-                logger.error("Could not find model selector trigger button to list models")
+                logger.error("Could not open model selector dropdown to list models")
                 return []
-                
-            await asyncio.sleep(0.5)
-            
+
             models = await self.cdp.evaluate("""((() => {
-                const els = document.querySelectorAll('div[class*="portal"] span, div[class*="dropdown"] span, div[class*="menu"] span');
-                const results = [];
                 const seen = new Set();
-                for (const el of els) {
-                    const txt = el.textContent.trim();
-                    // Filter out purely UI texts or short things like "Beta", counts, or headers
-                    if (txt.length >= 2 && txt.length < 40 && txt !== 'Beta' && !txt.includes('requests') && !txt.includes('复制') && !txt.includes('第') && !txt.includes('模型') && !txt.includes('⌘')) {
-                        if (!seen.has(txt)) {
-                            seen.add(txt);
-                            results.push(txt);
-                        }
-                    }
+                const results = [];
+                const items = Array.from(document.querySelectorAll('.icube-model-select-portal-model-item'));
+
+                for (const item of items) {
+                    const rect = item.getBoundingClientRect();
+                    if (rect.width === 0 || rect.height === 0) continue;
+
+                    const wrapper = item.querySelector('.icube-model-select-portal-model-item-wrapper');
+                    const rawText = (wrapper?.innerText || item.innerText || item.textContent || '').trim();
+                    const firstLine = rawText.split('\n')[0].trim();
+
+                    if (!firstLine || seen.has(firstLine)) continue;
+                    seen.add(firstLine);
+                    results.push(firstLine);
                 }
+
                 return results;
             })())""")
-            
-            # Close dropdown
+
             await self.cdp.evaluate("document.body.click();")
             await asyncio.sleep(0.2)
-            
+
             if isinstance(models, list):
                 return [m for m in models if m]
-                
+
             return []
-            
+
         except Exception as e:
             logger.error(f"Failed to get available models: {e}")
             return []
