@@ -344,9 +344,18 @@ async def switch_model(request: ModelSwitchRequest):
         
         success = await dom_helper.switch_model(request.model)
         if not success:
+            error_message = None
+            if hasattr(dom_helper, "get_last_model_switch_error"):
+                try:
+                    error_message = dom_helper.get_last_model_switch_error()
+                except Exception:
+                    error_message = None
+
             raise HTTPException(
                 status_code=400,
-                detail=f"Failed to apply model switch in UI. Is '{request.model}' available?"
+                detail=error_message or (
+                    f"Failed to apply model switch in UI. Is '{request.model}' available?"
+                )
             )
 
         return {

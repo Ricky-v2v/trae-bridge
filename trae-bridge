@@ -2,92 +2,194 @@
 # Trae Bridge Skill Launcher
 # 自动启动 Trae Bridge 服务
 
+set -u
+set -o pipefail
+
 TRAEBRIDGE_DIR="$HOME/.openclaw/workspace/skills/trae-bridge"
 VENV_PYTHON="$TRAEBRIDGE_DIR/venv/bin/python"
+LOG_DIR="$TRAEBRIDGE_DIR/logs"
+LOG_FILE="$LOG_DIR/bridge.log"
+PID_FILE="$TRAEBRIDGE_DIR/logs/bridge.pid"
+BRIDGE_HEALTH_URL="http://127.0.0.1:8765/health"
+
+ensure_environment() {
+    if [ ! -d "$TRAEBRIDGE_DIR" ]; then
+        echo "❌ Trae Bridge 目录不存在: $TRAEBRIDGE_DIR"
+        exit 1
+    fi
+    if [ ! -x "$VENV_PYTHON" ]; then
+        echo "❌ Python 环境不存在或不可执行: $VENV_PYTHON"
+        echo "请先创建 venv 并安装依赖。"
+        exit 1
+    fi
+    mkdir -p "$LOG_DIR"
+    touch "$LOG_FILE"
+}
 
 # 检查 Trae 是否已启动（通过 CDP 端口检测）
 check_trae_running() {
-    if curl -s http://localhost:9230/json/list > /dev/null 2>&1; then
+    if curl -s --max-time 2 http://localhost:9230/json/list > /dev/null 2>&1; then
         return 0
     fi
     return 1
 }
 
-# 检查 Bridge 是否已运行
+# 检查 Bridge HTTP 是否可达
 check_bridge_running() {
-    if curl -s http://127.0.0.1:8765/health > /dev/null 2>&1; then
+    if curl -s --max-time 2 "$BRIDGE_HEALTH_URL" > /dev/null 2>&1; then
         return 0
     fi
     return 1
+}
+
+bridge_connected_state() {
+    local payload
+    payload="$(curl -s --max-time 2 "$BRIDGE_HEALTH_URL" 2>/dev/null || true)"
+    if [ -z "$payload" ]; then
+        echo "unknown"
+        return
+    fi
+
+    if echo "$payload" | python3 -c "import json,sys; print('true' if json.load(sys.stdin).get('connected') is True else 'false')" 2>/dev/null; then
+        return
+    fi
+
+    echo "unknown"
+}
+
+is_pid_running() {
+    local pid="$1"
+    if [ -n "$pid" ] && kill -0 "$pid" >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
+
+read_pid_file() {
+    if [ -f "$PID_FILE" ]; then
+        tr -d ' \t\n\r' < "$PID_FILE"
+    fi
 }
 
 case "${1:-status}" in
     start)
+        ensure_environment
+
+        pid="$(read_pid_file)"
+        if [ -n "${pid:-}" ] && is_pid_running "$pid"; then
+            echo "✅ Trae Bridge 已在运行 (PID: $pid)"
+            echo "📍 API: http://127.0.0.1:8765"
+            exit 0
+        fi
+
         if check_bridge_running; then
             echo "✅ Trae Bridge 已在运行 (http://127.0.0.1:8765)"
             exit 0
         fi
-        
+
         if ! check_trae_running; then
             echo "⚠️  Trae 未检测到 CDP 连接"
             echo "请先运行: $TRAEBRIDGE_DIR/scripts/start_trae.sh"
             exit 1
         fi
-        
+
         echo "🚀 启动 Trae Bridge..."
-        cd "$TRAEBRIDGE_DIR"
-        nohup "$VENV_PYTHON" scripts/bridge.py --log-level INFO > logs/bridge.log 2>&1 &
-        
+        cd "$TRAEBRIDGE_DIR" || exit 1
+        nohup "$VENV_PYTHON" scripts/bridge.py --log-level INFO > "$LOG_FILE" 2>&1 &
+        echo "$!" > "$PID_FILE"
+
         # 等待服务启动
         for i in {1..10}; do
             if check_bridge_running; then
-                echo "✅ Trae Bridge 启动成功！"
-                echo "📍 API: http://127.0.0.1:8765"
-                echo "📊 Health: curl http://127.0.0.1:8765/health"
-                exit 0
+                connected_state="$(bridge_connected_state)"
+                if [ "$connected_state" = "true" ]; then
+                    echo "✅ Trae Bridge 启动成功！"
+                    echo "📍 API: http://127.0.0.1:8765"
+                    echo "📊 Health: curl $BRIDGE_HEALTH_URL"
+                    exit 0
+                fi
             fi
             sleep 1
         done
-        
-        echo "❌ 启动超时，查看日志: tail -f $TRAEBRIDGE_DIR/logs/bridge.log"
+
+        echo "❌ 启动超时或未连接 Trae，查看日志: tail -f $LOG_FILE"
         exit 1
         ;;
-        
+
     stop)
+        ensure_environment
         echo "🛑 停止 Trae Bridge..."
-        pkill -f "trae-bridge/scripts/bridge.py" 2>/dev/null || true
-        echo "✅ 已停止"
+
+        pid="$(read_pid_file)"
+        stopped=0
+
+        if [ -n "${pid:-}" ] && is_pid_running "$pid"; then
+            kill "$pid" >/dev/null 2>&1 || true
+            sleep 1
+            if is_pid_running "$pid"; then
+                kill -9 "$pid" >/dev/null 2>&1 || true
+            fi
+            stopped=1
+        fi
+
+        # 兼容没有 pid 文件的历史场景，尽量缩小匹配范围
+        pkill -f "$VENV_PYTHON scripts/bridge.py" >/dev/null 2>&1 && stopped=1 || true
+
+        rm -f "$PID_FILE"
+
+        if [ "$stopped" -eq 1 ]; then
+            echo "✅ 已停止"
+        else
+            echo "ℹ️  未发现运行中的 Bridge 进程"
+        fi
         ;;
-        
+
     status)
+        ensure_environment
         echo "📊 Trae Bridge 状态"
         echo "=================="
-        
+
         if check_trae_running; then
             echo "🟢 Trae CDP: 已连接 (localhost:9230)"
         else
             echo "🔴 Trae CDP: 未连接"
             echo "   启动命令: $TRAEBRIDGE_DIR/scripts/start_trae.sh"
         fi
-        
+
+        pid="$(read_pid_file)"
+        if [ -n "${pid:-}" ] && is_pid_running "$pid"; then
+            echo "🟢 Bridge 进程: 运行中 (PID: $pid)"
+        else
+            echo "🔴 Bridge 进程: 未运行"
+        fi
+
         if check_bridge_running; then
-            echo "🟢 Bridge API: 运行中 (http://127.0.0.1:8765)"
-            curl -s http://127.0.0.1:8765/health | python3 -m json.tool 2>/dev/null || true
+            connected_state="$(bridge_connected_state)"
+            if [ "$connected_state" = "true" ]; then
+                echo "🟢 Bridge API: 运行中且已连接 Trae (http://127.0.0.1:8765)"
+            elif [ "$connected_state" = "false" ]; then
+                echo "🟡 Bridge API: 运行中，但未连接 Trae (http://127.0.0.1:8765)"
+            else
+                echo "🟡 Bridge API: 运行中，连接状态未知 (http://127.0.0.1:8765)"
+            fi
+            curl -s "$BRIDGE_HEALTH_URL" | python3 -m json.tool 2>/dev/null || true
         else
             echo "🔴 Bridge API: 未运行"
             echo "   启动命令: trae-bridge start"
         fi
         ;;
-        
+
     logs)
-        tail -f "$TRAEBRIDGE_DIR/logs/bridge.log"
+        ensure_environment
+        tail -f "$LOG_FILE"
         ;;
-        
+
     client)
-        cd "$TRAEBRIDGE_DIR"
+        ensure_environment
+        cd "$TRAEBRIDGE_DIR" || exit 1
         "$VENV_PYTHON" scripts/client.py interactive
         ;;
-        
+
     *)
         echo "用法: trae-bridge [start|stop|status|logs|client]"
         echo ""

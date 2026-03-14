@@ -14,6 +14,7 @@ class TestAPIServerModelSwitch(unittest.TestCase):
         # We need to mock dom_helper functions used by the API
         self.patcher = patch('src.api_server.dom_helper')
         self.mock_dom_helper = self.patcher.start()
+        self.mock_dom_helper.get_last_model_switch_error.return_value = None
         
         # Also mock the CDP connection checks
         self.conn_patcher = patch('src.api_server.ensure_connection', new_callable=AsyncMock)
@@ -60,6 +61,22 @@ class TestAPIServerModelSwitch(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         data = response.json()
         self.assertIn("Failed to apply model switch in UI", data["detail"])
+
+    def test_switch_model_failure_with_friendly_error(self):
+        """Use DOM helper's user-facing error detail when available."""
+        self.mock_dom_helper.switch_model = AsyncMock(return_value=False)
+        self.mock_dom_helper.get_last_model_switch_error.return_value = (
+            "No model matched 'gemini-3-pro'. Try one of: Gemini-3-Pro-Preview"
+        )
+
+        response = self.client.post(
+            "/model",
+            json={"model": "gemini-3-pro"}
+        )
+
+        self.assertEqual(response.status_code, 400)
+        data = response.json()
+        self.assertIn("No model matched", data["detail"])
 
     def test_switch_model_internal_error(self):
         """Test handling of unexpected exceptions from dom_helper"""

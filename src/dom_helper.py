@@ -11,6 +11,7 @@ Selectors are based on Trae's actual DOM structure (as of 2026-03):
 
 import asyncio
 import logging
+import re
 from typing import Optional, Any
 from .cdp_client import CDPClient
 
@@ -55,14 +56,202 @@ class DOMHelper:
         'button[class*="send" i]',
     ]
 
+    _MODEL_NORMALIZE_RE = re.compile(r"[^a-z0-9\u4e00-\u9fff]+")
+    _MODEL_TOKEN_SPLIT_RE = re.compile(r"[^a-z0-9\u4e00-\u9fff]+")
+    _MODEL_STOPWORDS = {"model", "models", "use", "using", "模型", "使用"}
+    MODEL_NAME_MAP = {
+        "g3p": "gemini-3-pro",
+        "gemini3pro": "gemini-3-pro",
+        "geminipro": "gemini-3-pro",
+        "g3f": "gemini-3-flash",
+        "gemini3flash": "gemini-3-flash",
+        "g35s": "claude-3.5-sonnet",
+        "c35s": "claude-3.5-sonnet",
+        "claude35sonnet": "claude-3.5-sonnet",
+        "gpt4o": "gpt-4o",
+        "gpt41": "gpt-4.1",
+        "o1mini": "o1-mini",
+        "o3mini": "o3-mini",
+    }
+
     def __init__(self, cdp_client: CDPClient):
         self.cdp = cdp_client
         self._cached_input_selector: Optional[str] = None
         self._cached_send_selector: Optional[str] = None
+        self._last_model_switch_error: Optional[str] = None
         self._response_finished_event = asyncio.Event()
         
         # Register for console events to catch our custom completion signal
         self.cdp.add_event_listener("Runtime.consoleAPICalled", self._handle_console_event)
+
+    @staticmethod
+    def _escape_js_string(value: str) -> str:
+        """Escape Python string for embedding inside single-quoted JS string literals."""
+        return (
+            value
+            .replace("\\", "\\\\")
+            .replace("'", "\\'")
+            .replace("\n", "\\n")
+            .replace("\r", "")
+        )
+
+    @classmethod
+    def _normalize_model_name(cls, value: str) -> str:
+        """Normalize model names: case-insensitive and remove spaces/special chars."""
+        if not value:
+            return ""
+        return cls._MODEL_NORMALIZE_RE.sub("", value.lower())
+
+    @classmethod
+    def _tokenize_model_name(cls, value: str) -> list[str]:
+        """Tokenize model name for fuzzy scoring."""
+        if not value:
+            return []
+        tokens = cls._MODEL_TOKEN_SPLIT_RE.split(value.lower())
+        return [t for t in tokens if t and t not in cls._MODEL_STOPWORDS]
+
+    @classmethod
+    def _expand_query_aliases(cls, model_name: str) -> set[str]:
+        """Expand query into normalized forms using the model alias map."""
+        variants: set[str] = set()
+        if not model_name:
+            return variants
+
+        normalized = cls._normalize_model_name(model_name)
+        token_key = "".join(cls._tokenize_model_name(model_name))
+
+        if normalized:
+            variants.add(normalized)
+        if token_key:
+            variants.add(token_key)
+
+        for key in (normalized, token_key):
+            if not key:
+                continue
+            mapped = cls.MODEL_NAME_MAP.get(key)
+            if mapped:
+                variants.add(cls._normalize_model_name(mapped))
+
+        return variants
+
+    @classmethod
+    def _score_model_candidate(
+        cls,
+        query_variants: set[str],
+        query_tokens: set[str],
+        candidate_norm: str,
+        candidate_tokens: set[str],
+    ) -> int:
+        """Score a candidate model name against the query with intent-aware weights."""
+        if not candidate_norm:
+            return -1
+
+        score = -1
+        for query_norm in query_variants:
+            if not query_norm:
+                continue
+            if candidate_norm == query_norm:
+                score = max(score, 1200)
+            elif candidate_norm.startswith(query_norm) and len(query_norm) >= 3:
+                score = max(score, 980)
+            elif query_norm.startswith(candidate_norm) and len(candidate_norm) >= 3:
+                score = max(score, 650)
+            elif query_norm in candidate_norm and len(query_norm) >= 4:
+                score = max(score, 860)
+            elif candidate_norm in query_norm and len(candidate_norm) >= 4:
+                score = max(score, 520)
+
+        overlap = len(query_tokens & candidate_tokens)
+        score += overlap * 70
+
+        wants_pro = "pro" in query_tokens
+        wants_flash = "flash" in query_tokens
+        wants_preview = "preview" in query_tokens
+        has_pro = "pro" in candidate_tokens
+        has_flash = "flash" in candidate_tokens
+        has_preview = "preview" in candidate_tokens
+
+        if wants_pro:
+            score += 180 if has_pro else -180
+            if has_flash:
+                score -= 220
+        if wants_flash:
+            score += 180 if has_flash else -180
+            if has_pro:
+                score -= 220
+        if wants_preview and has_preview:
+            score += 90
+
+        # Prefer tighter names when score is otherwise close.
+        shortest_query = min((len(v) for v in query_variants if v), default=0)
+        if shortest_query:
+            score -= abs(len(candidate_norm) - shortest_query)
+
+        return score
+
+    def match_model_name(
+        self,
+        model_name: str,
+        available_models: list[str]
+    ) -> tuple[Optional[str], Optional[str]]:
+        """
+        Match user input to the best model name in available list.
+
+        Returns:
+            (best_model, error_message)
+        """
+        if not (model_name or "").strip():
+            return None, "Model name is empty. Please provide a valid model name."
+
+        if not available_models:
+            return None, "No models are available from Trae UI right now."
+
+        query_variants = self._expand_query_aliases(model_name)
+        query_tokens = set(self._tokenize_model_name(model_name))
+        if not query_variants:
+            return None, f"Model '{model_name}' is invalid after normalization."
+
+        scored: list[tuple[int, str, str]] = []
+        fallback: list[tuple[int, str]] = []
+
+        for model in available_models:
+            candidate = (model or "").strip()
+            if not candidate:
+                continue
+            candidate_norm = self._normalize_model_name(candidate)
+            if not candidate_norm:
+                continue
+            candidate_tokens = set(self._tokenize_model_name(candidate))
+
+            score = self._score_model_candidate(
+                query_variants=query_variants,
+                query_tokens=query_tokens,
+                candidate_norm=candidate_norm,
+                candidate_tokens=candidate_tokens,
+            )
+            if score > 0:
+                scored.append((score, candidate, candidate_norm))
+
+            overlap = len(query_tokens & candidate_tokens)
+            prefix_hit = int(any(candidate_norm.startswith(v) for v in query_variants if v))
+            fallback.append((overlap * 100 + prefix_hit * 80, candidate))
+
+        if not scored:
+            fallback.sort(key=lambda x: (-x[0], x[1].lower()))
+            suggestions = [name for _, name in fallback[:3] if name]
+            if suggestions:
+                return None, (
+                    f"No model matched '{model_name}'. "
+                    f"Try one of: {', '.join(suggestions)}"
+                )
+            return None, f"No model matched '{model_name}'."
+
+        scored.sort(key=lambda x: (-x[0], len(x[2]), x[1].lower()))
+        return scored[0][1], None
+
+    def get_last_model_switch_error(self) -> Optional[str]:
+        """Return the latest user-facing model switch error, if any."""
+        return self._last_model_switch_error
 
 
     async def find_input_element(self) -> Optional[str]:
@@ -174,26 +363,11 @@ class DOMHelper:
                 .replace('\r', '')
             )
 
-            # Step 1: Focus input and clear existing content
-            logger.debug("Focusing input and clearing content...")
-            await self.cdp.evaluate(
-                f"""((() => {{
-                    const input = document.querySelector('{input_selector}');
-                    if (!input) return false;
-                    input.focus();
-                    // Select all existing content and delete it
-                    const selection = window.getSelection();
-                    const range = document.createRange();
-                    range.selectNodeContents(input);
-                    selection.removeAllRanges();
-                    selection.addRange(range);
-                    document.execCommand('delete', false, null);
-                    return true;
-                }})())"""
-            )
-
-            # Small delay for focus/clear to take effect
-            await asyncio.sleep(0.1)
+            # Step 1: Clear existing content before typing new question
+            cleared = await self._clear_input_box(input_selector=input_selector)
+            if not cleared:
+                logger.error("Input box could not be cleared. Aborting message send.")
+                return False
 
             # Step 2: Insert text using execCommand (works with Lexical/contenteditable)
             logger.debug(f"Inserting text: {message[:50]}...")
@@ -263,6 +437,73 @@ class DOMHelper:
         except Exception as e:
             logger.error(f"Failed to send message: {e}")
             return False
+
+    async def _is_input_empty(self, input_selector: str) -> bool:
+        """Check whether chat input is effectively empty."""
+        result = await self.cdp.evaluate(
+            f"""((() => {{
+                const input = document.querySelector('{input_selector}');
+                if (!input) return false;
+                const text = (input.innerText || input.textContent || '').replace(/\\u00A0/g, ' ').trim();
+                return text.length === 0;
+            }})())"""
+        )
+        return bool(result)
+
+    async def _clear_input_box(self, input_selector: str, retries: int = 3) -> bool:
+        """
+        Clear the chat input safely before entering a new question.
+
+        This only operates on the input box content and does not touch chat history.
+        """
+        try:
+            if await self._is_input_empty(input_selector):
+                logger.info("Input box clear confirmed: already empty.")
+                return True
+        except Exception as e:
+            logger.debug(f"Initial input-empty check failed: {e}")
+
+        for attempt in range(1, retries + 1):
+            try:
+                cleared = await self.cdp.evaluate(
+                    f"""((() => {{
+                        const input = document.querySelector('{input_selector}');
+                        if (!input) return false;
+
+                        input.focus();
+
+                        const selection = window.getSelection();
+                        const range = document.createRange();
+                        range.selectNodeContents(input);
+                        selection.removeAllRanges();
+                        selection.addRange(range);
+
+                        // Primary strategy for Lexical/contenteditable.
+                        document.execCommand('delete', false, null);
+
+                        // Defensive fallback to ensure text nodes are empty.
+                        input.textContent = '';
+                        input.innerHTML = '';
+                        input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                        input.dispatchEvent(new Event('change', {{ bubbles: true }}));
+
+                        return true;
+                    }})())"""
+                )
+
+                if not cleared:
+                    continue
+
+                await asyncio.sleep(0.05)
+                if await self._is_input_empty(input_selector):
+                    logger.info("Input box clear confirmed before new question (attempt %s).", attempt)
+                    return True
+
+            except Exception as e:
+                logger.debug(f"Clear input attempt {attempt} failed: {e}")
+
+        logger.warning("Input box clear failed after %s attempts.", retries)
+        return False
 
     async def _count_assistant_turns(self) -> int:
         """Get the current number of assistant message turns."""
@@ -708,6 +949,104 @@ class DOMHelper:
             logger.error(f"Failed to open model selector: {e}")
             return False
 
+    async def _get_dropdown_model_options(self) -> list[str]:
+        """Read visible model options from already-open dropdown."""
+        result = await self.cdp.evaluate("""((() => {
+            const seen = new Set();
+            const results = [];
+            const items = Array.from(document.querySelectorAll('.icube-model-select-portal-model-item'));
+
+            for (const item of items) {
+                const rect = item.getBoundingClientRect();
+                if (rect.width === 0 || rect.height === 0) continue;
+
+                const wrapper = item.querySelector('.icube-model-select-portal-model-item-wrapper');
+                const rawText = (wrapper?.innerText || item.innerText || item.textContent || '').trim();
+                if (!rawText) continue;
+
+                const lines = rawText
+                    .split('\\n')
+                    .map(s => s.trim())
+                    .filter(Boolean);
+                const label = lines.join(' ').replace(/\\s+/g, ' ').trim();
+
+                if (!label || seen.has(label)) continue;
+                seen.add(label);
+                results.push(label);
+            }
+
+            return results;
+        })())""")
+
+        if isinstance(result, list):
+            return [str(m).strip() for m in result if str(m).strip()]
+        return []
+
+    async def _click_dropdown_model_by_name(self, chosen_model: str) -> bool:
+        """Click an item in the open model dropdown by normalized model text."""
+        escaped = self._escape_js_string(chosen_model)
+        clicked = await self.cdp.evaluate(
+            f"""((() => {{
+                const normalize = (s) => (s || '')
+                    .toLowerCase()
+                    .replace(/[^a-z0-9\\u4e00-\\u9fff]+/g, '');
+                const targetRaw = '{escaped}';
+                const target = normalize(targetRaw);
+                if (!target) return false;
+
+                const items = Array.from(document.querySelectorAll('.icube-model-select-portal-model-item'));
+                let exact = null;
+                let prefix = null;
+
+                for (const item of items) {{
+                    const rect = item.getBoundingClientRect();
+                    if (rect.width === 0 || rect.height === 0) continue;
+
+                    const wrapper = item.querySelector('.icube-model-select-portal-model-item-wrapper');
+                    const rawText = (wrapper?.innerText || item.innerText || item.textContent || '').trim();
+                    if (!rawText) continue;
+
+                    const lines = rawText
+                        .split('\\n')
+                        .map(s => s.trim())
+                        .filter(Boolean);
+                    const label = lines.join(' ').replace(/\\s+/g, ' ').trim();
+                    const normalized = normalize(label);
+                    if (!normalized) continue;
+
+                    if (normalized === target) {{
+                        exact = item;
+                        break;
+                    }}
+                    if (!prefix && (normalized.startsWith(target) || target.startsWith(normalized))) {{
+                        prefix = item;
+                    }}
+                }}
+
+                const chosen = exact || prefix;
+                if (!chosen) return false;
+
+                chosen.scrollIntoView({{ block: 'center' }});
+                chosen.dispatchEvent(new PointerEvent('pointerdown', {{ bubbles: true, cancelable: true, pointerType: 'mouse' }}));
+                chosen.dispatchEvent(new MouseEvent('mousedown', {{ bubbles: true, cancelable: true, view: window, button: 0, buttons: 1 }}));
+                chosen.dispatchEvent(new MouseEvent('mouseup', {{ bubbles: true, cancelable: true, view: window, button: 0, buttons: 1 }}));
+                chosen.click();
+                return true;
+            }})())"""
+        )
+        return bool(clicked)
+
+    async def _get_current_selected_model_text(self) -> str:
+        """Read currently selected model text from model trigger."""
+        result = await self.cdp.evaluate(
+            """((() => {
+                const trigger = document.querySelector('button.icd-model-select-trigger');
+                const raw = (trigger?.innerText || trigger?.textContent || '').trim();
+                return raw.replace(/\\s+/g, ' ').trim();
+            })())"""
+        )
+        return str(result).strip() if result else ""
+
     async def switch_model(self, model_name: str) -> bool:
         """
         Switch to a specific AI model via Trae UI.
@@ -718,74 +1057,56 @@ class DOMHelper:
         Returns:
             True if successful, False otherwise
         """
+        self._last_model_switch_error = None
+
         try:
             logger.info("Opening model selector dropdown...")
             opened = await self._open_model_selector()
 
             if not opened:
-                logger.error("Could not open model selector dropdown")
+                self._last_model_switch_error = "Could not open model selector dropdown in Trae UI."
+                logger.error(self._last_model_switch_error)
                 return False
 
             logger.info(f"Looking for model: {model_name}")
-            escaped_model = model_name.replace('\\', '\\\\').replace("'", "\\'")
+            available_models = await self._get_dropdown_model_options()
+            chosen_model, error_message = self.match_model_name(model_name, available_models)
+            if not chosen_model:
+                self._last_model_switch_error = error_message or f"No model matched '{model_name}'."
+                logger.warning(self._last_model_switch_error)
+                await self.cdp.evaluate("document.body.click();")
+                await asyncio.sleep(0.2)
+                return False
 
-            clicked = await self.cdp.evaluate(
-                f"""((() => {{
-                    const normalize = (s) => (s || '').toLowerCase().replace(/\\s+/g, '').trim();
-                    const target = normalize('{escaped_model}');
-                    const root = document.querySelector('[role="listbox"], .icube-model-select-portal-content');
-                    if (!root) return false;
-
-                    const items = Array.from(root.querySelectorAll('.icube-model-select-portal-model-item'));
-                    let best = null;
-                    let bestScore = -1;
-
-                    for (const item of items) {{
-                        const rect = item.getBoundingClientRect();
-                        if (rect.width === 0 || rect.height === 0) continue;
-
-                        const wrapper = item.querySelector('.icube-model-select-portal-model-item-wrapper');
-                        const rawText = (wrapper?.innerText || item.innerText || item.textContent || '').trim();
-                        const firstLine = rawText.split('\n')[0].trim();
-                        const normalized = normalize(firstLine);
-                        if (!normalized) continue;
-
-                        let score = -1;
-                        if (normalized === target) score = 300;
-                        else if (normalized.replace(/preview$/, '') === target.replace(/preview$/, '')) score = 250;
-                        else if (normalized.startsWith(target)) score = 200;
-                        else if (target.startsWith(normalized)) score = 180;
-                        else if (normalized.includes(target) || target.includes(normalized)) score = 120;
-
-                        if (score > bestScore) {{
-                            best = item;
-                            bestScore = score;
-                        }}
-                    }}
-
-                    if (!best || bestScore < 0) return false;
-
-                    best.scrollIntoView({{ block: 'center' }});
-
-                    best.dispatchEvent(new PointerEvent('pointerdown', {{ bubbles: true, cancelable: true, pointerType: 'mouse' }}));
-                    best.dispatchEvent(new MouseEvent('mousedown', {{ bubbles: true, cancelable: true, view: window, button: 0, buttons: 1 }}));
-                    best.dispatchEvent(new MouseEvent('mouseup', {{ bubbles: true, cancelable: true, view: window, button: 0, buttons: 1 }}));
-                    best.click();
-                    return true;
-                }})())"""
-            )
-
+            logger.info(f"Model match resolved: '{model_name}' -> '{chosen_model}'")
+            clicked = await self._click_dropdown_model_by_name(chosen_model)
             if clicked:
-                logger.info(f"Successfully clicked model matching '{model_name}'")
+                logger.info(f"Successfully clicked model '{chosen_model}'")
                 await asyncio.sleep(0.8)
-                return True
+                selected_model = await self._get_current_selected_model_text()
+                verified, _ = self.match_model_name(model_name, [selected_model])
+                if verified:
+                    return True
 
-            logger.warning(f"Could not find model matching '{model_name}' in dropdown")
+                self._last_model_switch_error = (
+                    f"Model switch verification failed. Requested '{model_name}', "
+                    f"but current selection appears to be '{selected_model or 'unknown'}'."
+                )
+                logger.warning(self._last_model_switch_error)
+                await self.cdp.evaluate("document.body.click();")
+                await asyncio.sleep(0.2)
+                return False
+
+            self._last_model_switch_error = (
+                f"Failed to click matched model '{chosen_model}' for input '{model_name}'."
+            )
+            logger.warning(self._last_model_switch_error)
             await self.cdp.evaluate("document.body.click();")
             await asyncio.sleep(0.2)
             return False
 
         except Exception as e:
+            self._last_model_switch_error = f"Unexpected error during model switch: {e}"
             logger.error(f"Failed to switch model: {e}")
             return False
 
@@ -800,26 +1121,7 @@ class DOMHelper:
                 logger.error("Could not open model selector dropdown to list models")
                 return []
 
-            models = await self.cdp.evaluate("""((() => {
-                const seen = new Set();
-                const results = [];
-                const items = Array.from(document.querySelectorAll('.icube-model-select-portal-model-item'));
-
-                for (const item of items) {
-                    const rect = item.getBoundingClientRect();
-                    if (rect.width === 0 || rect.height === 0) continue;
-
-                    const wrapper = item.querySelector('.icube-model-select-portal-model-item-wrapper');
-                    const rawText = (wrapper?.innerText || item.innerText || item.textContent || '').trim();
-                    const firstLine = rawText.split('\n')[0].trim();
-
-                    if (!firstLine || seen.has(firstLine)) continue;
-                    seen.add(firstLine);
-                    results.push(firstLine);
-                }
-
-                return results;
-            })())""")
+            models = await self._get_dropdown_model_options()
 
             await self.cdp.evaluate("document.body.click();")
             await asyncio.sleep(0.2)
