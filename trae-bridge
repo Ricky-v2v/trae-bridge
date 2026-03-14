@@ -1,0 +1,102 @@
+#!/bin/bash
+# Trae Bridge Skill Launcher
+# 自动启动 Trae Bridge 服务
+
+TRAEBRIDGE_DIR="$HOME/.openclaw/workspace/skills/trae-bridge"
+VENV_PYTHON="$TRAEBRIDGE_DIR/venv/bin/python"
+
+# 检查 Trae 是否已启动（通过 CDP 端口检测）
+check_trae_running() {
+    if curl -s http://localhost:9230/json/list > /dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
+
+# 检查 Bridge 是否已运行
+check_bridge_running() {
+    if curl -s http://127.0.0.1:8765/health > /dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
+
+case "${1:-status}" in
+    start)
+        if check_bridge_running; then
+            echo "✅ Trae Bridge 已在运行 (http://127.0.0.1:8765)"
+            exit 0
+        fi
+        
+        if ! check_trae_running; then
+            echo "⚠️  Trae 未检测到 CDP 连接"
+            echo "请先运行: $TRAEBRIDGE_DIR/scripts/start_trae.sh"
+            exit 1
+        fi
+        
+        echo "🚀 启动 Trae Bridge..."
+        cd "$TRAEBRIDGE_DIR"
+        nohup "$VENV_PYTHON" scripts/bridge.py --log-level INFO > logs/bridge.log 2>&1 &
+        
+        # 等待服务启动
+        for i in {1..10}; do
+            if check_bridge_running; then
+                echo "✅ Trae Bridge 启动成功！"
+                echo "📍 API: http://127.0.0.1:8765"
+                echo "📊 Health: curl http://127.0.0.1:8765/health"
+                exit 0
+            fi
+            sleep 1
+        done
+        
+        echo "❌ 启动超时，查看日志: tail -f $TRAEBRIDGE_DIR/logs/bridge.log"
+        exit 1
+        ;;
+        
+    stop)
+        echo "🛑 停止 Trae Bridge..."
+        pkill -f "trae-bridge/scripts/bridge.py" 2>/dev/null || true
+        echo "✅ 已停止"
+        ;;
+        
+    status)
+        echo "📊 Trae Bridge 状态"
+        echo "=================="
+        
+        if check_trae_running; then
+            echo "🟢 Trae CDP: 已连接 (localhost:9230)"
+        else
+            echo "🔴 Trae CDP: 未连接"
+            echo "   启动命令: $TRAEBRIDGE_DIR/scripts/start_trae.sh"
+        fi
+        
+        if check_bridge_running; then
+            echo "🟢 Bridge API: 运行中 (http://127.0.0.1:8765)"
+            curl -s http://127.0.0.1:8765/health | python3 -m json.tool 2>/dev/null || true
+        else
+            echo "🔴 Bridge API: 未运行"
+            echo "   启动命令: trae-bridge start"
+        fi
+        ;;
+        
+    logs)
+        tail -f "$TRAEBRIDGE_DIR/logs/bridge.log"
+        ;;
+        
+    client)
+        cd "$TRAEBRIDGE_DIR"
+        "$VENV_PYTHON" scripts/client.py interactive
+        ;;
+        
+    *)
+        echo "用法: trae-bridge [start|stop|status|logs|client]"
+        echo ""
+        echo "命令:"
+        echo "  start   - 启动 Bridge 服务"
+        echo "  stop    - 停止 Bridge 服务"
+        echo "  status  - 查看运行状态"
+        echo "  logs    - 查看日志"
+        echo "  client  - 启动交互式客户端"
+        exit 1
+        ;;
+esac
